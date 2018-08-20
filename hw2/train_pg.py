@@ -125,10 +125,6 @@ def train_PG(exp_name='',
     else:
         sy_ac_na = tf.placeholder(shape=[None, ac_dim], name="Action", dtype=tf.float32)
 
-        # Define a placeholder for advantages
-
-    # TODO
-
     sy_adv_n = tf.placeholder(shape=[None], name='advance', dtype=tf.float32)
 
     # ========================================================================================#
@@ -177,13 +173,6 @@ def train_PG(exp_name='',
         # N
         sy_sampled_ac = tf.squeeze(tf.multinomial(sy_logits_na, 1, name="Predict"),
                                    axis=1)  # Hint: Use the tf.multinomial op
-        # N
-        # softmax  N x ac_dim  sy_ac_na N
-
-        # with tf.Session() as sess:
-        #     print(tf.shape(sy_ac_na))
-        #     print(tf.shape(sy_logits_na))
-        #
         with tf.name_scope('Loss'):
             num = tf.range(tf.shape(sy_ac_na)[0])  # rows
             indices = tf.stack([num, sy_ac_na], axis=1)
@@ -192,10 +181,18 @@ def train_PG(exp_name='',
 
     else:
         # YOUR_CODE_HERE
-        sy_mean = TODO
-        sy_logstd = TODO  # logstd should just be a trainable variable, not a network output.
-        sy_sampled_ac = TODO
-        sy_logprob_n = TODO  # Hint: Use the log probability under a multivariate gaussian. 
+        sy_mean = build_mlp(input_placeholder=sy_ob_no, output_size=ac_dim, scope="Policy", size=64, n_layers=3)
+        sy_logstd = tf.get_variable(name="Sigma", dtype=tf.float32, shape=[ac_dim],
+                                    initializer=tf.ones_initializer())  # logstd should just be a trainable variable, not a network output.
+
+        normal_dist = tf.distributions.Normal(sy_mean, sy_logstd, name="PredictDistribution")
+
+        sy_sampled_ac = tf.clip_by_value(normal_dist.sample(), env.action_space.low, env.action_space.high,
+                                         name="PredictAction")
+
+        with tf.name_scope("Loss"):
+            sy_logprob_n = normal_dist.log_prob(
+                sy_ac_na)  # Hint: Use the log probability under a multivariate gaussian.
 
     # ========================================================================================#
     #                           ----------SECTION 4----------
@@ -409,7 +406,6 @@ def train_PG(exp_name='',
 
         # YOUR_CODE_HERE
 
-
         feed_dic = {sy_ob_no: ob_no, sy_ac_na: ac_na, sy_adv_n: q_n}
         update_op.run(feed_dict=feed_dic)
 
@@ -477,7 +473,7 @@ def main():
     parser.add_argument('--exp_name', type=str, default='vpg')
     parser.add_argument('--render', action='store_true')
     parser.add_argument('--discount', type=float, default=1.0)
-    parser.add_argument('--n_iter', '-n', type=int, default=4)
+    parser.add_argument('--n_iter', '-n', type=int, default=100)
     parser.add_argument('--batch_size', '-b', type=int, default=1000)
     parser.add_argument('--ep_len', '-ep', type=float, default=-1.)
     parser.add_argument('--learning_rate', '-lr', type=float, default=5e-3)
@@ -485,7 +481,7 @@ def main():
     parser.add_argument('--dont_normalize_advantages', '-dna', action='store_true')
     parser.add_argument('--nn_baseline', '-bl', action='store_true')
     parser.add_argument('--seed', type=int, default=1)
-    parser.add_argument('--n_experiments', '-e', type=int, default=2)
+    parser.add_argument('--n_experiments', '-e', type=int, default=1)
     parser.add_argument('--n_layers', '-l', type=int, default=1)
     parser.add_argument('--size', '-s', type=int, default=32)
     args = parser.parse_args()
@@ -512,7 +508,7 @@ def main():
         fun_args.max_path_length = max_path_length
         fun_args.learning_rate = args.learning_rate
         fun_args.reward_to_go = args.reward_to_go
-        fun_args.render = args.render
+        fun_args.render = True
         fun_args.logdir = logdir
         fun_args.dont_normalize_advantages = args.dont_normalize_advantages
         fun_args.nn_baseline = args.nn_baseline
@@ -524,7 +520,7 @@ def main():
         # repeatedly calling train_PG in the same thread.
         p = Process(target=train_func, args=(fun_args,))
         p.start()
-
+        p.join()
 
 
 if __name__ == "__main__":
