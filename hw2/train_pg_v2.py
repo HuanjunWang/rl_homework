@@ -26,7 +26,7 @@ class MyArgument(object):
                  n_layers=1,
                  size=32,
                  debug=False,
-                 train_size=100):
+                 max_loss=100):
         self.exp_name = exp_name
         self.env_name = env_name
         self.n_iter = n_iter
@@ -37,7 +37,7 @@ class MyArgument(object):
         self.reward_to_go = reward_to_go
         self.render = render
         self.debug = debug
-        self.train_size = train_size
+        self.max_loss = max_loss
 
         self.normalize_advantage = normalize_advantage
         self.nn_baseline = nn_baseline
@@ -53,7 +53,7 @@ class MyArgument(object):
         self.log_dir += 'nn_%d_%d_' % (self.n_layers, self.size)
         self.log_dir += 'lr_%6f_' % self.learning_rate
         self.log_dir += 'batch_%d_' % self.min_batch_size
-        self.log_dir += 't_%d' % self.train_size
+        self.log_dir += 't_%d' % self.max_loss
 
         self.log_dir = os.path.join(base_dir, self.log_dir)
         self.log_dir = os.path.join(self.log_dir, 'seed%d' % self.seed)
@@ -73,6 +73,14 @@ class PgModel(object):
             self.ph_mean_reward = tf.placeholder(name="reward", dtype=tf.float32)
             tf.summary.scalar("MeanReward", self.ph_mean_reward)
 
+        self.predict_action = None
+        self.critic_opt = None
+        self.actor_opt = None
+        self.ph_action = None
+        self.predict_baseline = None
+        self.merged = None
+        self.critic_loss = None
+
     @staticmethod
     def build_mlp(input_placeholder, output_size, scope,
                   n_layers=2, size=64, activation=tf.nn.relu, output_activation=None):
@@ -84,10 +92,39 @@ class PgModel(object):
         return x
 
     def get_predict_action(self, sess, observation):
-        pass
+        action = sess.run(self.predict_action, feed_dict={self.ph_observation: observation[None]})
+        return action[0]
 
-    def update(self, observations, actions, q):
-        pass
+    def update(self, sess, observations, actions, q, normalize_advance, mean_reward, max_loss):
+        if self.nn_baseline:
+            # Update Cirtic Network
+
+            baseline = sess.run(self.predict_baseline, feed_dict={self.ph_observation: observations})
+            updated_baseline = baseline * .9 + q * .1
+            sess.run([self.critic_opt], feed_dict={self.ph_observation: observations,
+                                                   self.ph_q_value: updated_baseline})
+            advance = q - baseline
+        else:
+            advance = q.copy()
+
+        if normalize_advance:
+            advance = (advance - np.mean(advance)) / (np.std(advance) + 1e-8)
+
+        # Update the Actor network
+
+        if self.debug:
+            _, summary = sess.run([self.action_opt, self.merged], feed_dict={self.ph_observation: observations,
+                                                                             self.ph_action: actions,
+                                                                             self.ph_advance: advance,
+                                                                             self.ph_q_value: q,
+                                                                             self.ph_mean_reward: mean_reward})
+        else:
+            sess.run(self.action_opt, feed_dict={self.ph_observation: observations,
+                                                 self.ph_action: actions,
+                                                 self.ph_advance: advance})
+            summary = None
+
+        return summary
 
 
 class PgModelContinuous(PgModel):
@@ -162,39 +199,6 @@ class PgModelContinuous(PgModel):
             tf.summary.histogram(w.name, w)
         self.merged = tf.summary.merge_all()
 
-    def get_predict_action(self, sess, observation):
-        action = sess.run(self.predict_action, feed_dict={self.ph_observation: observation[None]})
-        return action[0]
-
-    def update(self, sess, observations, actions, q, normalize_advance, mean_reward):
-        if self.nn_baseline:
-            # Update Critic Network
-            for i in range(10):
-                sess.run(self.critic_opt, feed_dict={self.ph_observation: observations,
-                                                     self.ph_q_value: q})
-            baseline = sess.run(self.predict_baseline, feed_dict={self.ph_observation: observations})
-            advance = q - baseline
-        else:
-            advance = q.copy()
-
-        if normalize_advance:
-            advance = (advance - np.mean(advance)) / np.std(advance)
-
-        # Update the Actor network
-        if self.debug:
-            _, summary = sess.run([self.action_opt, self.merged], feed_dict={self.ph_observation: observations,
-                                                                             self.ph_action: actions,
-                                                                             self.ph_advance: advance,
-                                                                             self.ph_q_value: q,
-                                                                             self.ph_mean_reward: mean_reward})
-        else:
-            sess.run(self.action_opt, feed_dict={self.ph_observation: observations,
-                                                 self.ph_action: actions,
-                                                 self.ph_advance: advance})
-            summary = None
-
-        return summary
-
 
 class PgModelDiscrete(PgModel):
     def __init__(self, env, n_layers, size, learning_rate, nn_baseline, debug):
@@ -241,40 +245,6 @@ class PgModelDiscrete(PgModel):
         for w in weights:
             tf.summary.histogram(w.name, w)
         self.merged = tf.summary.merge_all()
-
-    def get_predict_action(self, sess, observation):
-        action = sess.run(self.predict_action, feed_dict={self.ph_observation: observation[None]})
-        return action[0]
-
-    def update(self, sess, observations, actions, q, normalize_advance, mean_reward):
-        if self.nn_baseline:
-            # Update Cirtic Network
-            for i in range(int(observations.shape[0] / 500)):
-                sess.run(self.critic_opt, feed_dict={self.ph_observation: observations,
-                                                     self.ph_q_value: q})
-            baseline = sess.run(self.predict_baseline, feed_dict={self.ph_observation: observations})
-            advance = q - baseline
-        else:
-            advance = q.copy()
-
-        if normalize_advance:
-            advance = (advance - np.mean(advance)) / (np.std(advance) + 1e-8)
-
-        # Update the Actor network
-        for i in range(int(observations.shape[0] / 500)):
-            if self.debug:
-                _, summary = sess.run([self.action_opt, self.merged], feed_dict={self.ph_observation: observations,
-                                                                                 self.ph_action: actions,
-                                                                                 self.ph_advance: advance,
-                                                                                 self.ph_q_value: q,
-                                                                                 self.ph_mean_reward: mean_reward})
-            else:
-                sess.run(self.action_opt, feed_dict={self.ph_observation: observations,
-                                                     self.ph_action: actions,
-                                                     self.ph_advance: advance})
-                summary = None
-
-        return summary
 
 
 def discount_reward(paths, gamma, reward_to_go):
@@ -381,7 +351,19 @@ def train_pg(args):
     #     verify_model(sess, model, env)
 
     max_path_length = args.max_path_length or env.spec.max_episode_steps
+
+    start = time.time()
     for itr in range(args.n_iter):
+        end = time.time()
+        cost = end - start
+        start = end
+        if itr > 0:
+            if itr == 1:
+                mean_cost = cost
+            else:
+                mean_cost = .9 * mean_cost + .1 * cost
+            print("Time: %1f " % mean_cost, "Togo:%1f min" % ((args.n_iter - itr) * mean_cost / 60))
+
         print("********** Iteration %i ************" % itr)
         time_steps_this_batch = 0
         paths = []
@@ -417,13 +399,14 @@ def train_pg(args):
 
         path_reward = [sum(path['reward']) for path in paths]
         mean_reward = sum(path_reward) / len(path_reward)
-        print(mean_reward)
+        print("Average Reward:", mean_reward)
 
         ob_batch = np.concatenate([path["observation"] for path in paths])
         ac_batch = np.concatenate([path["action"] for path in paths])
         q_batch = discount_reward(paths, args.gamma, args.reward_to_go)
         summary = model.update(sess, observations=ob_batch, actions=ac_batch,
-                               q=q_batch, normalize_advance=args.normalize_advantage, mean_reward=mean_reward)
+                               q=q_batch, normalize_advance=args.normalize_advantage,
+                               mean_reward=mean_reward, max_loss=args.max_loss)
 
         if args.debug:
             writer.add_summary(summary, itr)
@@ -434,13 +417,13 @@ def main():
     for baseline in [True]:
         for normalize in [True]:
             for reward_to_go in [True]:
-                for lr in [5e-4, 3e-4]:
-                    for min_batch in [2000, 1000]:
-                        for train_size in [400]:
-                            for seed in [77]:
-                                env_name = 'CartPole-v0'
-                                env_name = 'MountainCar-v0'
-                                env_name = 'MountainCarContinuous-v0'
+                for min_batch in [10000]:
+                    for lr in [1e-2]:
+                        for max_loss in [1e6]:
+                            for seed in [23]:
+                                # env_name = 'CartPole-v0'
+                                # env_name = 'MountainCar-v0'
+                                # env_name = 'MountainCarContinuous-v0'
                                 env_name = 'InvertedPendulum-v1'
                                 # env_name = "Ant-v1"
                                 env_name = 'HalfCheetah-v1'
@@ -448,16 +431,16 @@ def main():
                                                   seed=seed,
                                                   debug=True,
                                                   n_layers=3,
-                                                  size=128,
+                                                  size=64,
                                                   reward_to_go=reward_to_go,
                                                   normalize_advantage=normalize,
                                                   nn_baseline=baseline,
-                                                  n_iter=50,
+                                                  n_iter=1200,
                                                   learning_rate=lr,
                                                   render=False,
-                                                  max_path_length=40,
+                                                  max_path_length=500,
                                                   min_batch_size=min_batch,
-                                                  train_size=train_size)
+                                                  max_loss=max_loss)
                                 p = Process(target=train_pg, args=(args,))
                                 p.start()
                                 p.join()
